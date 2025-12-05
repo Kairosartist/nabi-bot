@@ -173,29 +173,35 @@ app.get('/webhook', (req, res) => {
 // Receive messages
 app.post('/webhook', async (req, res) => {
   try {
+    console.log('📦 RAW WEBHOOK BODY:');
+    console.log(JSON.stringify(req.body, null, 2));
+
     const entry = req.body.entry?.[0];
     const change = entry?.changes?.[0];
-    const value = change?.value;
-    const message = value?.messages?.[0];
+    const message = change?.value?.messages?.[0];
 
+    // אם זו לא הודעה אמיתית (סטטוס וכו') — רק נאשר
     if (!message) {
+      console.log('ℹ️ No user message (probably status update)');
       return res.sendStatus(200);
     }
 
     const from = message.from;
-    let text = message.text?.body || '';
-    let imageUrl = null;
-    const hasImage = message.type === 'image';
+    const text = message.text?.body || '';
 
-    // אם יש תמונה – מביאים את ה־URL
-    if (hasImage && message.image?.id) {
-      const mediaRes = await axios.get(
-        `https://graph.facebook.com/v17.0/${message.image.id}`,
-        { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
-      );
-      imageUrl = mediaRes.data.url;
-      text = message.image.caption || text;
-    }
+    console.log(`✅ MESSAGE FROM USER: ${from}`);
+    console.log(`📝 TEXT: ${text}`);
+
+    // תגובת בדיקה פשוטה
+    await sendWhatsApp(from, `✅ נאבי חי! קיבלתי ממך: ${text}`);
+
+    return res.sendStatus(200);
+
+  } catch (err) {
+    console.error('❌ WEBHOOK CRASH:', err?.response?.data || err);
+    return res.sendStatus(200); // תמיד 200 כדי ש-Meta לא תחסום אותך
+  }
+});
 
     console.log(`📩 Message from ${from}: ${text} (image: ${!!imageUrl})`);
 
