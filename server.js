@@ -1,5 +1,3 @@
-// server.js – Nabi minimal echo bot for WhatsApp Cloud API
-
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
@@ -8,117 +6,98 @@ const bodyParser = require('body-parser');
 const app = express();
 app.use(bodyParser.json());
 
-// ==== ENV VARIABLES ====
-const {
-  PORT = 3000,
-  VERIFY_TOKEN,
-  WHATSAPP_TOKEN,
-  PHONE_NUMBER_ID,
-} = process.env;
+const { PORT, VERIFY_TOKEN, WHATSAPP_TOKEN, PHONE_NUMBER_ID, XAI_API_KEY } = process.env;
 
-console.log('🚀 Starting Nabi bot...');
-console.log('ENV CHECK:', {
-  PORT,
-  HAS_VERIFY_TOKEN: !!VERIFY_TOKEN,
-  HAS_WHATSAPP_TOKEN: !!WHATSAPP_TOKEN,
-  PHONE_NUMBER_ID,
-});
+// בדיקת דופק
+app.get('/', (req, res) => res.send('Nabi Brain is Active! 🧠'));
 
-// ===== HEALTH CHECK =====
-app.get('/', (req, res) => {
-  res.send('Nabi Bot is Alive! 🧞‍♂️');
-});
-
-// ===== WEBHOOK VERIFY (GET) =====
+// אימות Webhook מול Meta
 app.get('/webhook', (req, res) => {
-  try {
-    const mode = req.query['hub.mode'];
-    const token = req.query['hub.verify_token'];
-    const challenge = req.query['hub.challenge'];
-
-    console.log('🔎 GET /webhook verify:', { mode, token });
-
-    if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-      console.log('✅ Webhook verified successfully');
-      return res.status(200).send(challenge);
+    if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) {
+        console.log('✅ Webhook verified');
+        res.send(req.query['hub.challenge']);
     } else {
-      console.warn('❌ Webhook verify failed – wrong token or mode');
-      return res.sendStatus(403);
+        res.sendStatus(400);
     }
-  } catch (err) {
-    console.error('❌ GET /webhook error:', err);
-    return res.sendStatus(500);
-  }
 });
 
-// ===== WEBHOOK MESSAGES (POST) =====
+// קבלת הודעות וטיפול בהן
 app.post('/webhook', async (req, res) => {
-  try {
-    console.log('📦 RAW WEBHOOK BODY:');
-    console.log(JSON.stringify(req.body, null, 2));
+    try {
+        const message = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+        
+        // נתעלם מהודעות סטטוס (כמו "נשלח", "נקרא") ונטפל רק בהודעות טקסט
+        if (message && message.type === 'text') {
+            const from = message.from;
+            const userText = message.text.body;
+            const userName = message.contacts?.[0]?.profile?.name || "חבר";
+            
+            console.log(`📩 הודעה מ-${userName} (${from}): ${userText}`);
 
-    const entry = req.body.entry?.[0];
-    const change = entry?.changes?.[0];
-    const value = change?.value;
-    const message = value?.messages?.[0];
+            // 1. שליחת הודעת "מקליד..." (כדי שהמשתמש ידע שאנחנו חושבים)
+            // (אופציונלי - נשמור את זה לשלב הבא לשיפור חוויה)
 
-    // אם אין הודעה של משתמש (למשל עדכון סטטוס) – רק מאשרים
-    if (!message) {
-      console.log('ℹ️ No user message (probably status update)');
-      return res.sendStatus(200);
+            // 2. קבלת תשובה חכמה מ-Grok
+            const aiResponse = await getGrokResponse(userText, userName);
+
+            // 3. שליחת התשובה לוואטסאפ
+            await sendWhatsApp(from, aiResponse);
+        }
+        res.sendStatus(200);
+    } catch (e) {
+        console.error('❌ Error processing message:', e.message);
+        res.sendStatus(500);
     }
-
-    const from = message.from;
-    const text = message.text?.body || '';
-
-    console.log('✅ INCOMING MESSAGE:', { from, text });
-
-    // תגובת טסט – אקו פשוט
-    const replyText = `✅ נאבי חי! קיבלתי ממך: "${text}"`;
-
-    await sendWhatsAppText(from, replyText);
-
-    return res.sendStatus(200);
-  } catch (err) {
-    console.error('❌ POST /webhook error:', err?.response?.data || err);
-    // תמיד להחזיר 200 כדי שמטה לא "יענישו" את הוובהוק
-    return res.sendStatus(200);
-  }
 });
 
-// ===== SEND WHATSAPP TEXT =====
-async function sendWhatsAppText(to, text) {
-  try {
-    if (!WHATSAPP_TOKEN || !PHONE_NUMBER_ID) {
-      console.error('❌ Missing WHATSAPP_TOKEN or PHONE_NUMBER_ID');
-      return;
+// פונקציה לתקשורת עם Grok (המוח)
+async function getGrokResponse(userText, userName) {
+    try {
+        const response = await axios.post(
+            'https://api.x.ai/v1/chat/completions',
+            {
+                model: "grok-beta", // המודל החכם של xAI
+                messages: [
+                    { 
+                        role: "system", 
+                        content: `אתה Nabi, עוזר יצירתי חכם וידידותי בווצאפ.
+                        כרגע אתה בשלב שיחה בלבד. דבר בעברית טבעית, זורמת וקצרה.
+                        המשתמש כרגע הוא: ${userName}.`
+                    },
+                    { role: "user", content: userText }
+                ],
+                temperature: 0.7
+            },
+            {
+                headers: {
+                    'Authorization': `Bearer ${XAI_API_KEY}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+        return response.data.choices[0].message.content;
+    } catch (error) {
+        console.error('❌ Error from Grok:', error.response?.data || error.message);
+        return "אופס, קצת הסתבכו לי המחשבות. נסה שוב עוד רגע 😅";
     }
-
-    const url = `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`;
-
-    const payload = {
-      messaging_product: 'whatsapp',
-      to,
-      type: 'text',
-      text: { body: text },
-    };
-
-    console.log('📤 Sending WhatsApp message:', { to, text });
-
-    const res = await axios.post(url, payload, {
-      headers: {
-        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-    });
-
-    console.log('✅ WhatsApp API response:', res.data);
-  } catch (err) {
-    console.error('❌ Error sending WhatsApp message:', err?.response?.data || err);
-  }
 }
 
-// ===== START SERVER =====
-app.listen(PORT, () => {
-  console.log(`🧞‍♂️ Nabi running on port ${PORT}`);
-});
+// פונקציה לשליחת הודעה לוואטסאפ
+async function sendWhatsApp(to, text) {
+    try {
+        await axios.post(
+            `https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`,
+            { 
+                messaging_product: 'whatsapp', 
+                to: to, 
+                text: { body: text } 
+            },
+            { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+        );
+        console.log('✅ תשובה נשלחה בהצלחה');
+    } catch (e) {
+        console.error('❌ Error sending WhatsApp:', e.response?.data || e.message);
+    }
+}
+
+app.listen(PORT || 3000, () => console.log(`🚀 Nabi Server is running on port ${PORT || 3000}`));
