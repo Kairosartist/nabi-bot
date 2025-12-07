@@ -6,45 +6,33 @@ const bodyParser = require('body-parser');
 const app = express();
 app.use(bodyParser.json());
 
-// --- משתני המערכת (החסכוניים והיעילים) ---
+// --- משתני סביבה וקונפיגורציה ---
 const { 
     PORT, VERIFY_TOKEN, WHATSAPP_TOKEN, PHONE_NUMBER_ID, 
     XAI_API_KEY, 
     SUNO_API_KEY, 
-    SUNO_API_URL 
+    SUNO_API_URL // חייב להיות: https://api.piapi.ai/api/v1
 } = process.env;
 
-// מודלים של xAI (הכי חדשים שיש)
+// מודלים
 const MODELS = {
-    BRAIN: "grok-3",             // המנכ"ל
-    ARTIST: "grok-2-image-1212", // הצייר
-    EYES: "grok-2-vision-1212"   // העיניים
+    BRAIN: "grok-3",
+    IMAGE: "grok-2-image-1212",
+    VISION: "grok-2-vision-1212"
 };
 
-// --- זיכרון קצר-טווח (Context) ---
-// זה מה שמאפשר לאמא להגיד "תעשה מ*זה* שיר"
-const userContext = new Map();
-
-function getContext(userId) {
-    if (!userContext.has(userId)) {
-        userContext.set(userId, { history: [], lastImageUrl: null });
-    }
-    return userContext.get(userId);
-}
-
+// --- ניהול זיכרון (Context) ---
+const chatHistory = new Map();
 function updateHistory(userId, role, content) {
-    const ctx = getContext(userId);
-    ctx.history.push({ role, content });
-    if (ctx.history.length > 10) ctx.history.shift(); // שומרים נקי
+    if (!chatHistory.has(userId)) chatHistory.set(userId, []);
+    const history = chatHistory.get(userId);
+    history.push({ role, content });
+    if (history.length > 15) history.shift(); 
 }
-
-function saveLastImage(userId, imageUrl) {
-    const ctx = getContext(userId);
-    ctx.lastImageUrl = imageUrl;
-}
+function getHistory(userId) { return chatHistory.get(userId) || []; }
 
 // --- שרת ---
-app.get('/', (req, res) => res.status(200).send('Nabi OS 1.0 - Minimalist & Powerful.'));
+app.get('/', (req, res) => res.status(200).send('💎 Nabi Enterprise is Online using PiAPI & Grok-3'));
 
 app.get('/webhook', (req, res) => {
     if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) {
@@ -54,222 +42,182 @@ app.get('/webhook', (req, res) => {
     }
 });
 
-// --- הליבה (The Core) ---
+// --- Pipeline ראשי ---
 app.post('/webhook', async (req, res) => {
-    res.sendStatus(200); // תגובה מיידית לוואטסאפ (חובה!)
+    res.sendStatus(200); // אישור מיידי למניעת לופים
 
     try {
         const message = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
         if (!message) return;
 
-        const userId = message.from;
-        const userName = message.contacts?.[0]?.profile?.name || "חבר";
-        
-        // 1. טיפול בתמונה (אמא שלחה תמונה)
+        const userPhone = message.from;
+        const userName = message.contacts?.[0]?.profile?.name || "לקוח";
+
+        console.log(`📥 הודעה חדשה מ-${userName} (${message.type})`);
+
+        // 1. טיפול בתמונות (VISION)
         if (message.type === 'image') {
-            // אנחנו שומרים את ה-ID של התמונה בזיכרון, אבל לא מגיבים מיד.
-            // אנחנו מחכים שהיא תגיד מה לעשות איתה ("תעשה אותנו רוקדים").
-            const imageId = message.image.id;
-            const imageUrl = await getWhatsAppMediaUrl(imageId);
-            
-            saveLastImage(userId, imageUrl);
-            updateHistory(userId, "user", "[המשתמש שלח תמונה]");
-            
-            await sendWhatsApp(userId, "קיבלתי את התמונה. מה לעשות איתה? 🎨");
+            // אם המשתמש שלח תמונה, נשלח לניתוח ראייה
+            await sendWhatsAppText(userPhone, "👀 אני מסתכל על התמונה...");
+            // כאן נדרש לוגיקה להורדת התמונה ושימוש ב-Grok Vision (יפותח בשלב הבא)
+            // כרגע נגיב בטקסט
+            await sendWhatsAppText(userPhone, "ראיתי את התמונה! (מודול הראייה המלא בפיתוח)");
             return;
         }
 
-        // 2. טיפול בטקסט (פקודות)
+        // 2. טיפול בטקסט (TEXT)
         if (message.type === 'text') {
-            const text = message.text.body;
-            updateHistory(userId, "user", text);
-            
-            console.log(`🧠 מעבד בקשה מ-${userName}: ${text}`);
+            const userText = message.text.body;
+            updateHistory(userPhone, "user", userText);
 
-            // מפעילים את הראוטר החכם
-            const decision = await nabiBrain(userId, text);
-            console.log(`🤖 החלטה: ${decision.type}`);
+            // הפעלת המוח (Router)
+            const action = await nabiBrain(userText, getHistory(userPhone));
+            console.log(`🤖 החלטת מוח: ${action.type}`);
 
-            switch (decision.type) {
+            switch (action.type) {
                 case 'SONG':
-                    await sendWhatsApp(userId, "🎶 על זה! מלחין את השיר שלך...");
-                    await createSong(userId, decision.prompt);
+                    await sendWhatsAppText(userPhone, "🎵 קיבלתי! יוצר להיט ב-Suno (זה לוקח כ-2 דקות)...");
+                    await generatePiApiMusic(userPhone, action.prompt);
                     break;
-
-                case 'IMAGE_EDIT': 
-                    // המקרה המורכב: "תעשה אותי מחייכת" על בסיס תמונה קודמת
-                    await sendWhatsApp(userId, "🎨 מסתכל על התמונה ומצייר מחדש...");
-                    await recreateImage(userId, decision.prompt);
+                case 'IMAGE':
+                    await sendWhatsAppText(userPhone, "🎨 רעיון אש. אני מצייר את זה...");
+                    await generateGrokImage(userPhone, action.prompt);
                     break;
-
-                case 'NEW_IMAGE':
-                    await sendWhatsApp(userId, "🎨 מתחיל לצייר...");
-                    await createImage(userId, decision.prompt);
-                    break;
-
                 case 'CHAT':
                 default:
-                    await sendWhatsApp(userId, decision.response);
-                    updateHistory(userId, "assistant", decision.response);
+                    await sendWhatsAppText(userPhone, action.response);
+                    updateHistory(userPhone, "assistant", action.response);
                     break;
             }
         }
 
     } catch (error) {
-        console.error('🔥 Error:', error.message);
+        console.error('🔥 CRITICAL ERROR:', error.message);
     }
 });
 
-// --- 🧠 המוח (Grok-3) ---
-async function nabiBrain(userId, input) {
-    const ctx = getContext(userId);
-    const hasImage = !!ctx.lastImageUrl;
-
-    const systemPrompt = `
-    אתה Nabi. המטרה: מינימליזם ופשטות.
-    תפקידך לנתח את בקשת המשתמש ולהחזיר JSON בלבד.
-    
-    המצבים האפשריים:
-    1. SONG: אם המשתמש רוצה שיר. צור "prompt" באנגלית שמתאר את הסגנון המוזיקלי והמילים (למשל: "Upbeat pop song in Hebrew, style of Hanan Ben Ari").
-    2. IMAGE_EDIT: אם המשתמש מבקש לשנות תמונה ששלח קודם (רק אם hasImage=true). למשל "תעשה אותי מחייכת".
-    3. NEW_IMAGE: אם המשתמש מבקש תמונה חדשה מאפס.
-    4. CHAT: סתם שיחה.
-    
-    החזר JSON במבנה: { "type": "...", "prompt": "...", "response": "..." }
-    `;
-
+// --- 🧠 המוח (Grok-3 Router) ---
+async function nabiBrain(text, history) {
     try {
+        const systemPrompt = `אתה Nabi, בינה מלאכותית עילית. עליך לנתח מה המשתמש רוצה ולהחזיר JSON בלבד.
+        סוגי פעולות:
+        1. "SONG" - אם המשתמש רוצה שיר. prompt = תיאור השיר באנגלית (Style, Lyrics topic).
+        2. "IMAGE" - אם המשתמש רוצה תמונה. prompt = תיאור ויזואלי באנגלית.
+        3. "CHAT" - כל דבר אחר. response = תשובה חכמה, קצרה וזורמת בעברית.
+        `;
+
         const response = await axios.post('https://api.x.ai/v1/chat/completions', {
             model: MODELS.BRAIN,
-            messages: [
-                { role: "system", content: systemPrompt },
-                ...ctx.history,
-                { role: "user", content: `(Image available: ${hasImage}) ${input}` }
-            ],
-            response_format: { type: "json_object" },
-            temperature: 0.4
+            messages: [{role: "system", content: systemPrompt}, ...history, {role: "user", content: text}],
+            temperature: 0.3,
+            stream: false,
+            response_format: { type: "json_object" }
         }, { headers: { 'Authorization': `Bearer ${XAI_API_KEY}` } });
 
         return JSON.parse(response.data.choices[0].message.content);
     } catch (e) {
-        return { type: 'CHAT', response: "רגע, מחשבה חלפה לי וברחה. נסה שוב?" };
+        console.error('Brain Error:', e.response?.data || e.message);
+        return { type: 'CHAT', response: "המוח שלי מתחמם, נסה שוב עוד רגע 😅" };
     }
 }
 
-// --- 🎨 "פוטושופ" חכם (Vision + Generation) ---
-async function recreateImage(userId, userRequest) {
-    const ctx = getContext(userId);
-    if (!ctx.lastImageUrl) {
-        await sendWhatsApp(userId, "לא מצאתי תמונה... תשלח לי קודם תמונה ואז תבקש לשנות אותה.");
-        return;
-    }
-
+// --- 🎵 מוזיקה (PiAPI / Suno) ---
+async function generatePiApiMusic(to, prompt) {
     try {
-        // שלב 1: העיניים רואות מה יש בתמונה המקורית
-        const visionResponse = await axios.post('https://api.x.ai/v1/chat/completions', {
-            model: MODELS.EYES,
-            messages: [
-                {
-                    role: "user",
-                    content: [
-                        { type: "text", text: "Describe this image in extreme detail so an artist can recreate it exactly. Focus on the people, clothes, and setting." },
-                        { type: "image_url", image_url: { url: ctx.lastImageUrl } }
-                    ]
-                }
-            ]
-        }, { headers: { 'Authorization': `Bearer ${XAI_API_KEY}` } });
+        if (!SUNO_API_KEY || !SUNO_API_URL) throw new Error("Missing PiAPI Config");
 
-        const originalDescription = visionResponse.data.choices[0].message.content;
-        
-        // שלב 2: משלבים את התיאור עם הבקשה ("מחייכת")
-        const finalPrompt = `Create a photorealistic image based on this description: ${originalDescription}. 
-        BUT modify it according to this request: ${userRequest}. High quality, 8k.`;
-
-        // שלב 3: יוצרים את התמונה החדשה
-        await createImage(userId, finalPrompt);
-
-    } catch (e) {
-        console.error("Image Edit Error:", e);
-        await sendWhatsApp(userId, "הסתבכתי עם התמונה הזאת... אולי ננסה אחרת?");
-    }
-}
-
-// --- 🎨 יצירת תמונה (Grok Image) ---
-async function createImage(userId, prompt) {
-    try {
-        const res = await axios.post('https://api.x.ai/v1/image/generations', {
-            prompt: prompt,
-            model: MODELS.ARTIST,
-            size: "1024x1024"
-        }, { headers: { 'Authorization': `Bearer ${XAI_API_KEY}` } });
-
-        const url = res.data.data[0].url;
-        await sendMedia(userId, 'image', url);
-    } catch (e) {
-        await sendWhatsApp(userId, "הצייר שלי בהפסקת קפה. נסה שוב עוד דקה.");
-    }
-}
-
-// --- 🎵 יצירת שיר (PiAPI / Suno) ---
-async function createSong(userId, prompt) {
-    try {
-        // 1. שליחת משימה
-        const res = await axios.post(`${SUNO_API_URL}/task`, {
-            model: "suno-v3.5",
+        // 1. יצירת משימה (Task)
+        const taskPayload = {
+            model: "suno-v3.5", // המודל הכי חדש של PiAPI
             task_type: "generate_music",
-            input: { gpt_description_prompt: prompt, make_instrumental: false, mv: "chirp-v3-0" }
-        }, { headers: { 'x-api-key': SUNO_API_KEY, 'Content-Type': 'application/json' } });
+            input: {
+                gpt_description_prompt: prompt, // התיאור מ-Grok
+                make_instrumental: false,
+                mv: "chirp-v3-0"
+            }
+        };
 
-        const taskId = res.data.data.task_id;
-        
-        // 2. בדיקה אם מוכן (Polling)
+        const createRes = await axios.post(`${SUNO_API_URL}/task`, taskPayload, {
+            headers: { 
+                'x-api-key': SUNO_API_KEY, // PiAPI משתמש ב-header הזה
+                'Content-Type': 'application/json' 
+            }
+        });
+
+        const taskId = createRes.data.data.task_id;
+        console.log(`🎵 PiAPI Task Created: ${taskId}`);
+
+        // 2. המתנה לתוצאה (Polling)
         let attempts = 0;
-        while (attempts < 40) { // מחכים עד 3 דקות בערך
-            await new Promise(r => setTimeout(r, 5000));
+        let audioUrl = null;
+        
+        while (attempts < 30) { // ננסה במשך 2.5 דקות (30 * 5 שניות)
+            await new Promise(r => setTimeout(r, 5000)); // חכה 5 שניות
             attempts++;
-            
-            const check = await axios.get(`${SUNO_API_URL}/task/${taskId}`, {
+
+            const statusRes = await axios.get(`${SUNO_API_URL}/task/${taskId}`, {
                 headers: { 'x-api-key': SUNO_API_KEY }
             });
 
-            if (check.data.data.status === 'completed') {
-                const audioUrl = check.data.data.output.audio_url || check.data.data.output[0].audio_url;
-                await sendMedia(userId, 'audio', audioUrl);
-                return;
+            const status = statusRes.data.data.status;
+            console.log(`🎵 Status Check (${attempts}): ${status}`);
+
+            if (status === 'completed') {
+                // PiAPI מחזיר לינק אודיו
+                // שים לב: המבנה עשוי להשתנות, אנחנו לוקחים את הראשון
+                audioUrl = statusRes.data.data.output.audio_url || statusRes.data.data.output[0].audio_url; 
+                break;
             }
-            if (check.data.data.status === 'failed') throw new Error("Generation Failed");
+            if (status === 'failed') throw new Error("PiAPI Task Failed");
         }
+
+        if (audioUrl) {
+            await sendWhatsAppMedia(to, 'audio', audioUrl);
+            await sendWhatsAppText(to, "🎵 הנה השיר שלך! (נוצר ע'י Suno v3.5)");
+        } else {
+            await sendWhatsAppText(to, "לקח יותר מדי זמן ליצור את השיר, נסה שוב מאוחר יותר.");
+        }
+
     } catch (e) {
-        await sendWhatsApp(userId, "לא הצלחתי להלחין את השיר הפעם. אולי המילים מורכבות מדי?");
+        console.error('Music Error:', e.message);
+        await sendWhatsAppText(to, "הייתה בעיה ביצירת השיר דרך PiAPI.");
     }
 }
 
-// --- תשתיות וואטסאפ (Infrastructure) ---
-async function getWhatsAppMediaUrl(mediaId) {
-    // 1. קבלת ה-URL הזמני
-    const res1 = await axios.get(`https://graph.facebook.com/v17.0/${mediaId}`, {
-        headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
-    });
-    // 2. קבלת ה-Binary (כרגע אנחנו מחזירים את ה-URL הציבורי אם יש, או משתמשים בפרוקסי. 
-    // לצורך פשטות ה-VISION של GROK דורש URL ציבורי. 
-    // בגרסת אנטרפרייז מלאה נצטרך להוריד ולהעלות ל-S3. כרגע נשתמש ב-URL של פייסבוק בתקווה ש-Grok יקבל אותו)
-    return res1.data.url; 
+// --- 🎨 תמונות (Grok Image) ---
+async function generateGrokImage(to, prompt) {
+    try {
+        const response = await axios.post('https://api.x.ai/v1/image/generations', {
+            prompt: prompt,
+            model: MODELS.IMAGE,
+            size: "1024x1024"
+        }, { headers: { 'Authorization': `Bearer ${XAI_API_KEY}` } });
+
+        const url = response.data.data[0].url;
+        await sendWhatsAppMedia(to, 'image', url, "הנה היצירה שלך 🎨");
+    } catch (e) {
+        console.error('Image Error:', e.message);
+        await sendWhatsAppText(to, "לא הצלחתי לצייר כרגע.");
+    }
 }
 
-async function sendWhatsApp(to, text) {
-    await axios.post(`https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`, 
-        { messaging_product: 'whatsapp', to, text: { body: text } },
-        { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
-    );
+// --- עזרים לשליחת הודעות ---
+async function sendWhatsAppText(to, text) {
+    return sendMeta(to, { text: { body: text } });
+}
+async function sendWhatsAppMedia(to, type, url, caption) {
+    const payload = { type: type };
+    payload[type] = { link: url, caption: caption };
+    return sendMeta(to, payload);
+}
+async function sendMeta(to, data) {
+    try {
+        await axios.post(`https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`, 
+        { messaging_product: 'whatsapp', to, ...data }, 
+        { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
+    } catch (e) {
+        console.error('Meta Send Error:', e.response?.data || e.message);
+    }
 }
 
-async function sendMedia(to, type, url) {
-    const payload = { messaging_product: 'whatsapp', to, type: type };
-    payload[type] = { link: url };
-    await axios.post(`https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`, 
-        payload, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
-    );
-}
-
-const PORT_NUM = PORT || 3000;
-app.listen(PORT_NUM, () => console.log(`🚀 Nabi OS Online on port ${PORT_NUM}`));
+app.listen(PORT || 3000, () => console.log(`🚀 Nabi Enterprise is Running!`));
