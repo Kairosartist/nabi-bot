@@ -56,7 +56,7 @@ async function getGrokResponse(userText, userName) {
         const response = await axios.post(
             'https://api.x.ai/v1/chat/completions',
             {
-                model: "grok-beta", // המודל החכם של xAI
+                model: "grok-3", // המודל החכם של xAI
                 messages: [
                     { 
                         role: "system", 
